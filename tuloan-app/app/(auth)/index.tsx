@@ -204,7 +204,7 @@ export default function LiveFaceVerification() {
 
   const scanTranslateY = scanAnimation.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, 288], // Height of the circular frame (72 * 4 = 288)
+    outputRange: [0, 320], // Height of the circular frame (80 * 4 = 320)
   });
 
   return (
@@ -235,10 +235,10 @@ export default function LiveFaceVerification() {
           </View>
         </View>
       ) : (
-        <View className="flex-1 bg-gradient-to-b from-blue-600 to-blue-800">
+        <View className="flex-1 bg-white">
           {/* Header */}
-          <View className="pt-12 pb-6 px-6 bg-blue-600">
-            <Text className="text-white text-2xl font-bold text-center">
+          <View className="pt-12 pb-4 px-6 bg-blue-600">
+            <Text className="text-white text-xl font-bold text-center">
               Login Authentication
             </Text>
           </View>
@@ -260,11 +260,14 @@ export default function LiveFaceVerification() {
 
             {/* Centered Camera Preview Circle */}
             <View className="flex-1 justify-center items-center">
-              <View className="relative">
-                {/* Circular Camera View Container with Dotted Border Animation */}
+              <View className="relative" style={{ width: 320, height: 320 }}>
+                {/* Circular Camera View Container */}
                 <View 
-                  className="w-80 h-80 rounded-full overflow-hidden"
                   style={{
+                    width: 320,
+                    height: 320,
+                    borderRadius: 160,
+                    overflow: 'hidden',
                     shadowColor: '#000',
                     shadowOffset: { width: 0, height: 10 },
                     shadowOpacity: 0.15,
@@ -273,7 +276,10 @@ export default function LiveFaceVerification() {
                 >
                   <CameraView 
                     ref={cameraRef} 
-                    className="flex-1 w-full h-full"
+                    style={{ 
+                      width: 320, 
+                      height: 320,
+                    }}
                     facing="front"
                     mirror={true}
                   />
@@ -281,9 +287,14 @@ export default function LiveFaceVerification() {
 
                 {/* Dotted Circle Border Overlay */}
                 <View 
-                  className="absolute inset-0 w-80 h-80 rounded-full"
                   style={{
-                    borderWidth: 3,
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: 320,
+                    height: 320,
+                    borderRadius: 160,
+                    borderWidth: 4,
                     borderColor: isMatched ? '#10B981' : '#34D399',
                     borderStyle: 'dashed',
                   }}
@@ -292,10 +303,13 @@ export default function LiveFaceVerification() {
                 {/* Scanning Animation Overlay */}
                 {isComparing && (
                   <Animated.View 
-                    className="absolute left-0 right-0 h-1 bg-green-400"
                     style={{ 
+                      position: 'absolute',
+                      left: 0,
                       top: 0,
                       width: 320,
+                      height: 2,
+                      backgroundColor: '#10B981',
                       transform: [{ translateY: scanTranslateY }],
                       shadowColor: '#10B981',
                       shadowOffset: { width: 0, height: 0 },
@@ -307,13 +321,19 @@ export default function LiveFaceVerification() {
 
                 {/* Match Status Indicator */}
                 {isMatched && (
-                  <View className="absolute -top-3 -right-3 bg-green-500 rounded-full p-4" style={{
+                  <View style={{
+                    position: 'absolute',
+                    top: -12,
+                    right: -12,
+                    backgroundColor: '#10B981',
+                    borderRadius: 30,
+                    padding: 12,
                     shadowColor: '#10B981',
                     shadowOffset: { width: 0, height: 4 },
                     shadowOpacity: 0.3,
                     shadowRadius: 8,
                   }}>
-                    <Text className="text-white text-2xl font-bold">✓</Text>
+                    <Text style={{ color: 'white', fontSize: 24, fontWeight: 'bold' }}>✓</Text>
                   </View>
                 )}
               </View>
@@ -333,20 +353,35 @@ export default function LiveFaceVerification() {
           </View>
 
           {/* Bottom Controls */}
-          <View className="pb-10 px-6">
-            <TouchableOpacity
-              onPress={() => {
-                setIdUploaded(false);
-                setIsMatched(false);
-                setMatchStatus("Position your face");
-                setConfidence(0);
-              }}
-              className="bg-white/20 px-6 py-4 rounded-2xl active:bg-white/30"
-            >
-              <Text className="text-white text-center text-base font-semibold">
-                Upload Different ID
-              </Text>
-            </TouchableOpacity>
+          <View className="pb-8 px-6 bg-white">
+            <View className="flex-row gap-4">
+              <TouchableOpacity
+                onPress={() => {
+                  setIdUploaded(false);
+                  setIsMatched(false);
+                  setMatchStatus("Position your face");
+                  setConfidence(0);
+                }}
+                className="flex-1 bg-gray-200 px-6 py-4 rounded-xl active:bg-gray-300"
+              >
+                <Text className="text-gray-800 text-center text-base font-semibold">
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                disabled={!isMatched}
+                className={`flex-1 px-6 py-4 rounded-xl ${
+                  isMatched ? 'bg-blue-600 active:bg-blue-700' : 'bg-gray-300'
+                }`}
+              >
+                <Text className={`text-center text-base font-semibold ${
+                  isMatched ? 'text-white' : 'text-gray-500'
+                }`}>
+                  Subscribe
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       )}

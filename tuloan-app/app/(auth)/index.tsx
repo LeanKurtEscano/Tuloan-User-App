@@ -1,41 +1,70 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, Alert, ActivityIndicator, Animated } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, Animated } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import { Audio } from 'expo-av';
 import axios from 'axios';
-
 
 export default function LiveFaceVerification() {
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [idUploaded, setIdUploaded] = useState<boolean>(false);
-  const [matchStatus, setMatchStatus] = useState<string>("Position your face");
   const [uploadingId, setUploadingId] = useState<boolean>(false);
   const [isComparing, setIsComparing] = useState<boolean>(false);
   const [isMatched, setIsMatched] = useState<boolean>(false);
   const [confidence, setConfidence] = useState<number>(0);
   
-  // Animation for scanning line
+  // Blink detection state
+  const [blinkCount, setBlinkCount] = useState<number>(0);
+  const [livenessVerified, setLivenessVerified] = useState<boolean>(false);
+  const REQUIRED_BLINKS = 2;
+  
+  // Prevent simultaneous captures
+  const isCapturingBlink = useRef<boolean>(false);
+  const isCapturingCompare = useRef<boolean>(false);
+  const isMounted = useRef<boolean>(true);
+  
+  // Animations
   const scanAnimation = useRef(new Animated.Value(0)).current;
+  const pulseAnimation = useRef(new Animated.Value(1)).current;
+  const borderAnimation = useRef(new Animated.Value(0)).current;
+  const progressAnimation = useRef(new Animated.Value(0)).current;
+  const successScale = useRef(new Animated.Value(0)).current;
+  const fadeIn = useRef(new Animated.Value(0)).current;
 
-  // Replace with your PC's LAN IP or emulator IP
   const serverUrl = "http://192.168.1.12:8000/api/facial/v1";
+  const sessionId = useRef(`session-${Date.now()}`).current;
 
-  // Request camera permission on mount
   useEffect(() => {
+    isMounted.current = true;
     if (!permission?.granted) {
       requestPermission();
     }
+    
+    return () => {
+      isMounted.current = false;
+      isCapturingBlink.current = false;
+      isCapturingCompare.current = false;
+    };
   }, []);
 
-  // Scanning line animation
+  // Fade in animation on mount
   useEffect(() => {
-    if (isComparing) {
+    Animated.timing(fadeIn, {
+      toValue: 1,
+      duration: 400,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  // Continuous scanning line animation
+  useEffect(() => {
+    if (idUploaded) {
       Animated.loop(
         Animated.sequence([
           Animated.timing(scanAnimation, {
             toValue: 1,
-            duration: 1500,
+            duration: 2000,
             useNativeDriver: true,
           }),
           Animated.timing(scanAnimation, {
@@ -46,22 +75,99 @@ export default function LiveFaceVerification() {
         ])
       ).start();
     }
-  }, [isComparing]);
+  }, [idUploaded]);
 
-  // Automatic live verification interval
+  // Pulse animation for active scanning
+  useEffect(() => {
+    if (idUploaded && !isMatched) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnimation, {
+            toValue: 1.05,
+            duration: 1500,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnimation, {
+            toValue: 1,
+            duration: 1500,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    }
+  }, [idUploaded, isMatched]);
+
+  // Border color animation
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(borderAnimation, {
+          toValue: 1,
+          duration: 1500,
+          useNativeDriver: false,
+        }),
+        Animated.timing(borderAnimation, {
+          toValue: 0,
+          duration: 1500,
+          useNativeDriver: false,
+        }),
+      ])
+    ).start();
+  }, []);
+
+  // Animate progress bar
+  useEffect(() => {
+    Animated.timing(progressAnimation, {
+      toValue: blinkCount / REQUIRED_BLINKS,
+      duration: 300,
+      useNativeDriver: false,
+    }).start();
+  }, [blinkCount]);
+
+  // Success animation
+  useEffect(() => {
+    if (isMatched) {
+      Animated.spring(successScale, {
+        toValue: 1,
+        tension: 50,
+        friction: 7,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      successScale.setValue(0);
+    }
+  }, [isMatched]);
+
+  // Blink detection interval
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (idUploaded && cameraRef.current && !isComparing) {
+    if (idUploaded && cameraRef.current && !livenessVerified && isMounted.current) {
       interval = setInterval(() => {
-        captureAndCompare();
+        if (!isCapturingBlink.current && isMounted.current) {
+          detectBlink();
+        }
+      }, 500);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [idUploaded, livenessVerified]);
+
+  // Face comparison interval (only after liveness verified)
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (idUploaded && livenessVerified && cameraRef.current && !isComparing && isMounted.current) {
+       interval = setInterval(() => {
+        if (!isCapturingCompare.current && isMounted.current) {
+          captureAndCompare();
+        }
       }, 1500);
     }
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [idUploaded, isComparing]);
+  }, [idUploaded, livenessVerified, isComparing]);
 
-  // Upload ID image
   const uploadId = async () => {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -97,33 +203,89 @@ export default function LiveFaceVerification() {
       
       if (data.status === 'success') {
         setIdUploaded(true);
-        setMatchStatus("Position your face in the frame");
-        Alert.alert("Success", "ID uploaded! Face verification will start automatically.");
-      } else {
-        Alert.alert("Error", data.message || "Failed to upload ID. Please use a clear photo with your face visible.");
       }
     } catch (err) {
       console.error('Upload ID Error:', err);
-      Alert.alert("Error", "Could not upload ID. Check server connection.");
     } finally {
       setUploadingId(false);
     }
   };
 
-  // Capture live frame and compare
-  const captureAndCompare = async () => {
-    if (!cameraRef.current || isComparing) return;
+  const detectBlink = async () => {
+    if (!cameraRef.current || livenessVerified || isCapturingBlink.current || !isMounted.current) {
+      return;
+    }
 
-    setIsComparing(true);
+    isCapturingBlink.current = true;
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.5,
-        skipProcessing: false,
+        skipProcessing: true,
       });
 
-      if (!photo?.uri) {
+      if (!photo?.uri || !isMounted.current) {
+        isCapturingBlink.current = false;
+        return;
+      }
+
+      const formData = new FormData();
+      const filename = photo.uri.split('/').pop() || 'blink.jpg';
+      const match = /\.(\w+)$/.exec(filename);
+      const type = match ? `image/${match[1]}` : 'image/jpeg';
+
+      formData.append('file', {
+        uri: photo.uri,
+        name: filename,
+        type: type,
+      } as any);
+
+      formData.append('session_id', sessionId);
+
+      const response = await axios.post(`${serverUrl}/detect-blink`, formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+        timeout: 5000,
+      });
+
+      if (!isMounted.current) return;
+
+      const data = response.data;
+      
+      if (data.face_detected) {
+        setBlinkCount(data.blink_count);
+
+        if (data.blink_count >= REQUIRED_BLINKS && !livenessVerified) {
+          setLivenessVerified(true);
+        }
+      }
+    } catch (err: any) {
+      if (isMounted.current) {
+        console.error('Blink Detection Error:', err);
+      }
+    } finally {
+      isCapturingBlink.current = false;
+    }
+  };
+
+  const captureAndCompare = async () => {
+    if (!cameraRef.current || isComparing || !livenessVerified || isCapturingCompare.current || !isMounted.current) {
+      return;
+    }
+
+    setIsComparing(true);
+    isCapturingCompare.current = true;
+
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.6,
+        skipProcessing: true,
+      });
+
+      if (!photo?.uri || !isMounted.current) {
         setIsComparing(false);
+        isCapturingCompare.current = false;
         return;
       }
 
@@ -142,243 +304,370 @@ export default function LiveFaceVerification() {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        timeout: 10000,
       });
+
+      if (!isMounted.current) return;
 
       const data = response.data;
       
-      if (data.no_id) {
-        setMatchStatus("⚠️ Please upload ID first");
-        setIsMatched(false);
-      } else if (data.no_face_detected) {
-        setMatchStatus("👤 No face detected");
-        setIsMatched(false);
-        setConfidence(0);
-      } else if (data.match) {
+      if (data.match) {
         setIsMatched(true);
         const confidencePercent = Math.max(0, Math.min(100, (1 - data.distance / data.threshold) * 100));
         setConfidence(confidencePercent);
-        setMatchStatus(`✅ Face Verified!`);
       } else {
         setIsMatched(false);
         setConfidence(0);
-        setMatchStatus(`❌ Face does not match`);
       }
-    } catch (err) {
-      console.error('Compare Error:', err);
-      setIsMatched(false);
-      setMatchStatus("⚠️ Connection error");
+    } catch (err: any) {
+      if (isMounted.current) {
+        console.error('Compare Error:', err);
+        setIsMatched(false);
+      }
     } finally {
-      setIsComparing(false);
+      if (isMounted.current) {
+        setIsComparing(false);
+      }
+      isCapturingCompare.current = false;
+    }
+  };
+
+  
+
+  const resetVerification = async () => {
+    isCapturingBlink.current = false;
+    isCapturingCompare.current = false;
+    
+    setIdUploaded(false);
+    setIsMatched(false);
+    setConfidence(0);
+    setBlinkCount(0);
+    setLivenessVerified(false);
+    setIsComparing(false);
+    
+    progressAnimation.setValue(0);
+    
+    try {
+      await axios.post(`${serverUrl}/reset-blink-session`, { session_id: sessionId });
+      await axios.post(`${serverUrl}/reset`);
+    } catch (err) {
+      console.error('Reset error:', err);
     }
   };
 
   if (!permission) {
     return (
-      <View className="flex-1 justify-center items-center bg-gray-900">
-        <ActivityIndicator size="large" color="#3B82F6" />
-        <Text className="text-white text-lg mt-4">Loading camera...</Text>
+      <View className="flex-1 justify-center items-center bg-blue-600">
+        <ActivityIndicator size="large" color="#FFFFFF" />
+        <Text className="text-white text-lg mt-4 font-medium">Initializing camera...</Text>
       </View>
     );
   }
 
   if (!permission.granted) {
     return (
-      <View className="flex-1 justify-center items-center bg-gradient-to-b from-blue-900 to-gray-900 p-6">
-        <View className="bg-white/10 p-8 rounded-3xl items-center">
-          <Text className="text-white text-2xl font-bold mb-4 text-center">
-            Camera Access Required
+      <View className="flex-1 justify-center items-center bg-blue-600 px-8">
+        <Animated.View style={{ opacity: fadeIn }} className="items-center">
+          <View className="bg-white rounded-full w-24 h-24 items-center justify-center mb-8">
+            <Text className="text-6xl">📷</Text>
+          </View>
+          <Text className="text-white text-3xl font-bold mb-3 text-center">
+            Camera Access
           </Text>
-          <Text className="text-white/80 text-base mb-8 text-center">
-            We need camera permission for face verification
+          <Text className="text-white/90 text-base mb-10 text-center leading-6">
+            We need your permission to access the camera for face verification
           </Text>
           <TouchableOpacity
             onPress={requestPermission}
-            className="bg-blue-600 px-10 py-4 rounded-full active:bg-blue-700"
+            className="bg-white px-12 py-4 rounded-full active:bg-gray-100 shadow-lg"
           >
-            <Text className="text-white font-bold text-lg">Grant Permission</Text>
+            <Text className="text-blue-600 font-bold text-lg">Allow Camera</Text>
           </TouchableOpacity>
-        </View>
+        </Animated.View>
       </View>
     );
   }
 
   const scanTranslateY = scanAnimation.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, 320], // Height of the circular frame (80 * 4 = 320)
+    outputRange: [0, 300],
+  });
+
+  const progressWidth = progressAnimation.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0%', '100%'],
+  });
+
+  const borderColor = borderAnimation.interpolate({
+    inputRange: [0, 1],
+    outputRange: isMatched 
+      ? ['#10B981', '#34D399']
+      : livenessVerified
+      ? ['#3B82F6', '#60A5FA']
+      : ['#0066FF', '#4D94FF'],
   });
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1 bg-white">
       {!idUploaded ? (
-        <View className="flex-1 justify-center items-center bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
-          <View className="bg-white rounded-3xl p-8 shadow-2xl items-center w-full max-w-md">
-            <View className="bg-blue-100 p-6 rounded-full mb-6">
-              <Text className="text-5xl">🆔</Text>
+        <Animated.View style={{ opacity: fadeIn }} className="flex-1 justify-center items-center bg-blue-600 px-8">
+          <View className="items-center">
+            <View className="bg-white rounded-full w-32 h-32 items-center justify-center mb-8 shadow-xl">
+              <Text className="text-7xl">🆔</Text>
             </View>
-            <Text className="text-3xl font-bold text-gray-900 mb-3 text-center">
+            <Text className="text-white text-3xl font-bold mb-4 text-center">
               Face Verification
             </Text>
-            <Text className="text-base text-gray-600 mb-8 text-center">
-              Upload your ID photo to start the verification process
+            <Text className="text-white/90 text-base mb-12 text-center leading-6">
+              Upload a photo of your valid ID to begin the verification process
             </Text>
             <TouchableOpacity
               onPress={uploadId}
               disabled={uploadingId}
-              className={`w-full px-8 py-4 rounded-2xl ${
-                uploadingId ? 'bg-gray-400' : 'bg-blue-600 active:bg-blue-700'
+              className={`w-full px-10 py-5 rounded-full shadow-xl ${
+                uploadingId ? 'bg-white/50' : 'bg-white active:bg-gray-100'
               }`}
             >
-              <Text className="text-white font-bold text-lg text-center">
-                {uploadingId ? "Uploading..." : "📸 Upload ID Photo"}
-              </Text>
+              {uploadingId ? (
+                <View className="flex-row items-center justify-center">
+                  <ActivityIndicator size="small" color="#0066FF" />
+                  <Text className="text-blue-600 font-bold text-lg ml-3">Uploading...</Text>
+                </View>
+              ) : (
+                <Text className="text-blue-600 font-bold text-lg text-center">
+                  Upload ID Photo
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
-        </View>
+        </Animated.View>
       ) : (
         <View className="flex-1 bg-white">
           {/* Header */}
-          <View className="pt-12 pb-4 px-6 bg-blue-600">
-            <Text className="text-white text-xl font-bold text-center">
-              Login Authentication
+          <View className="pt-14 pb-6 px-6 bg-blue-600">
+            <Text className="text-white text-2xl font-bold text-center mb-1">
+              Face Verification
+            </Text>
+            <Text className="text-white/80 text-sm text-center">
+              {!livenessVerified 
+                ? `Blink ${REQUIRED_BLINKS} times naturally`
+                : isMatched
+                ? "Verification successful!"
+                : "Verifying your identity..."
+              }
             </Text>
           </View>
 
-          {/* Main Content Area - White Background */}
-          <View className="flex-1 bg-white px-6 pt-8">
-            {/* Instructions at top */}
-            <View className="mb-4">
-              <Text className="text-gray-900 text-xl font-bold text-center mb-2">
-                Hold the phone still. Rotate your Head. Go slow
-              </Text>
-              <Text className="text-gray-700 text-base text-center mb-1">
-                Position your face in the circle
-              </Text>
-              <Text className="text-gray-600 text-sm text-center">
-                Face detected. Please look into the circle and stay still.
-              </Text>
-            </View>
+          {/* Main Content */}
+          <View className="flex-1 px-6 pt-8">
+            {/* Progress Section */}
+            {!livenessVerified && (
+              <View className="bg-blue-50 rounded-3xl p-5 mb-6">
+                <View className="flex-row items-center justify-between mb-3">
+                  <Text className="text-blue-900 font-semibold text-base">
+                    Liveness Check
+                  </Text>
+                  <Text className="text-blue-600 font-bold text-base">
+                    {blinkCount}/{REQUIRED_BLINKS}
+                  </Text>
+                </View>
+                <View className="h-2 bg-blue-200 rounded-full overflow-hidden">
+                  <Animated.View 
+                    style={{ 
+                      width: progressWidth,
+                      backgroundColor: '#0066FF',
+                      height: '100%',
+                    }} 
+                  />
+                </View>
+                <Text className="text-blue-700 text-xs mt-3 text-center">
+                  Blink naturally to confirm you're a real person
+                </Text>
+              </View>
+            )}
 
-            {/* Centered Camera Preview Circle */}
+            {/* Camera Preview */}
             <View className="flex-1 justify-center items-center">
-              <View className="relative" style={{ width: 320, height: 320 }}>
-                {/* Circular Camera View Container */}
-                <View 
+              <View className="relative" style={{ width: 300, height: 300 }}>
+                {/* Glow Effect */}
+                <Animated.View
                   style={{
-                    width: 320,
-                    height: 320,
-                    borderRadius: 160,
+                    position: 'absolute',
+                    top: -15,
+                    left: -15,
+                    width: 330,
+                    height: 330,
+                    borderRadius: 165,
+                    backgroundColor: isMatched 
+                      ? 'rgba(16, 185, 129, 0.15)'
+                      : 'rgba(0, 102, 255, 0.15)',
+                    transform: [{ scale: pulseAnimation }],
+                  }}
+                />
+
+                {/* Camera */}
+                <View
+                  style={{
+                    width: 300,
+                    height: 300,
+                    borderRadius: 150,
                     overflow: 'hidden',
-                    shadowColor: '#000',
-                    shadowOffset: { width: 0, height: 10 },
-                    shadowOpacity: 0.15,
-                    shadowRadius: 20,
+                    backgroundColor: '#000',
                   }}
                 >
                   <CameraView 
                     ref={cameraRef} 
-                    style={{ 
-                      width: 320, 
-                      height: 320,
-                    }}
+                    style={{ width: 300, height: 300 }}
                     facing="front"
                     mirror={true}
                   />
                 </View>
 
-                {/* Dotted Circle Border Overlay */}
-                <View 
+                {/* Border */}
+                <Animated.View 
                   style={{
                     position: 'absolute',
                     top: 0,
                     left: 0,
-                    width: 320,
-                    height: 320,
-                    borderRadius: 160,
-                    borderWidth: 4,
-                    borderColor: isMatched ? '#10B981' : '#34D399',
-                    borderStyle: 'dashed',
+                    width: 300,
+                    height: 300,
+                    borderRadius: 150,
+                    borderWidth: 5,
+                    borderColor: borderColor,
                   }}
                 />
 
-                {/* Scanning Animation Overlay */}
-                {isComparing && (
-                  <Animated.View 
-                    style={{ 
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      width: 320,
-                      height: 2,
-                      backgroundColor: '#10B981',
-                      transform: [{ translateY: scanTranslateY }],
-                      shadowColor: '#10B981',
-                      shadowOffset: { width: 0, height: 0 },
-                      shadowOpacity: 0.8,
-                      shadowRadius: 10,
-                    }} 
-                  />
-                )}
+                {/* Scanning Line */}
+                <Animated.View 
+                  style={{ 
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    width: 300,
+                    height: 3,
+                    backgroundColor: isMatched ? '#10B981' : '#0066FF',
+                    transform: [{ translateY: scanTranslateY }],
+                    shadowColor: isMatched ? '#10B981' : '#0066FF',
+                    shadowOpacity: 0.8,
+                    shadowRadius: 10,
+                  }} 
+                />
 
-                {/* Match Status Indicator */}
-                {isMatched && (
+                {/* Corner Guides */}
+                {[0, 90, 180, 270].map((rotation, index) => (
+                  <View
+                    key={index}
+                    style={{
+                      position: 'absolute',
+                      top: 5,
+                      left: 5,
+                      width: 30,
+                      height: 30,
+                      borderTopWidth: 4,
+                      borderLeftWidth: 4,
+                      borderColor: isMatched ? '#10B981' : '#0066FF',
+                      borderTopLeftRadius: 8,
+                      transform: [
+                        { rotate: `${rotation}deg` },
+                        { translateX: rotation === 90 || rotation === 180 ? 260 : 0 },
+                        { translateY: rotation === 180 || rotation === 270 ? 260 : 0 },
+                      ],
+                    }}
+                  />
+                ))}
+
+                {/* Liveness Badge */}
+                {livenessVerified && (
                   <View style={{
                     position: 'absolute',
-                    top: -12,
-                    right: -12,
+                    top: -10,
+                    left: -10,
                     backgroundColor: '#10B981',
-                    borderRadius: 30,
-                    padding: 12,
+                    borderRadius: 25,
+                    width: 50,
+                    height: 50,
+                    alignItems: 'center',
+                    justifyContent: 'center',
                     shadowColor: '#10B981',
-                    shadowOffset: { width: 0, height: 4 },
-                    shadowOpacity: 0.3,
-                    shadowRadius: 8,
+                    shadowOpacity: 0.5,
+                    shadowRadius: 10,
                   }}>
                     <Text style={{ color: 'white', fontSize: 24, fontWeight: 'bold' }}>✓</Text>
                   </View>
                 )}
+
+                {/* Success Badge */}
+                {isMatched && (
+                  <Animated.View style={{
+                    position: 'absolute',
+                    top: -10,
+                    right: -10,
+                    backgroundColor: '#10B981',
+                    borderRadius: 25,
+                    width: 50,
+                    height: 50,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    shadowColor: '#10B981',
+                    shadowOpacity: 0.5,
+                    shadowRadius: 10,
+                    transform: [{ scale: successScale }],
+                  }}>
+                    <Text style={{ color: 'white', fontSize: 24, fontWeight: 'bold' }}>✓</Text>
+                  </Animated.View>
+                )}
               </View>
             </View>
 
-            {/* Status Message Below Circle */}
+            {/* Success Card */}
             {isMatched && (
-              <View className="mb-6">
-                <Text className="text-green-600 text-center text-lg font-bold mb-1">
-                  ✅ Identity Verified!
+              <Animated.View 
+                style={{ transform: [{ scale: successScale }] }}
+                className="bg-green-50 rounded-3xl p-6 mb-6 border-2 border-green-200"
+              >
+                <Text className="text-green-700 text-center text-xl font-bold mb-4">
+                  ✓ Identity Verified
                 </Text>
-                <Text className="text-gray-600 text-center text-sm">
-                  Match confidence: {confidence.toFixed(1)}%
-                </Text>
-              </View>
+                <View className="flex-row justify-around">
+                  <View className="items-center">
+                    <Text className="text-green-600 text-xs mb-1">Liveness</Text>
+                    <View className="bg-green-100 rounded-full w-12 h-12 items-center justify-center">
+                      <Text className="text-green-700 text-xl font-bold">✓</Text>
+                    </View>
+                  </View>
+                  <View className="items-center">
+                    <Text className="text-green-600 text-xs mb-1">Match Score</Text>
+                    <View className="bg-green-100 rounded-full w-12 h-12 items-center justify-center">
+                      <Text className="text-green-700 text-sm font-bold">{confidence.toFixed(0)}%</Text>
+                    </View>
+                  </View>
+                </View>
+              </Animated.View>
             )}
           </View>
 
-          {/* Bottom Controls */}
-          <View className="pb-8 px-6 bg-white">
-            <View className="flex-row gap-4">
+          {/* Bottom Actions */}
+          <View className="pb-10 px-6 bg-white">
+            <View className="flex-row gap-3">
               <TouchableOpacity
-                onPress={() => {
-                  setIdUploaded(false);
-                  setIsMatched(false);
-                  setMatchStatus("Position your face");
-                  setConfidence(0);
-                }}
-                className="flex-1 bg-gray-200 px-6 py-4 rounded-xl active:bg-gray-300"
+                onPress={resetVerification}
+                className="flex-1 bg-gray-100 px-6 py-4 rounded-full active:bg-gray-200"
               >
-                <Text className="text-gray-800 text-center text-base font-semibold">
-                  Cancel
+                <Text className="text-gray-700 text-center text-base font-bold">
+                  Start Over
                 </Text>
               </TouchableOpacity>
               
               <TouchableOpacity
                 disabled={!isMatched}
-                className={`flex-1 px-6 py-4 rounded-xl ${
+                className={`flex-1 px-6 py-4 rounded-full ${
                   isMatched ? 'bg-blue-600 active:bg-blue-700' : 'bg-gray-300'
                 }`}
               >
-                <Text className={`text-center text-base font-semibold ${
+                <Text className={`text-center text-base font-bold ${
                   isMatched ? 'text-white' : 'text-gray-500'
                 }`}>
-                  Subscribe
+                  {isMatched ? 'Continue' : 'Processing...'}
                 </Text>
               </TouchableOpacity>
             </View>

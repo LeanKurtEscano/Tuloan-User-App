@@ -2,29 +2,28 @@ import React, { useRef, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Animated } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { Audio } from 'expo-av';
 import axios from 'axios';
-
+import { useFaceRecog } from '@/hooks/useFaceRecognition';
 export default function LiveFaceVerification() {
-  const cameraRef = useRef<CameraView>(null);
-  const [permission, requestPermission] = useCameraPermissions();
-  const [idUploaded, setIdUploaded] = useState<boolean>(false);
-  const [uploadingId, setUploadingId] = useState<boolean>(false);
-  const [isComparing, setIsComparing] = useState<boolean>(false);
-  const [isMatched, setIsMatched] = useState<boolean>(false);
-  const [confidence, setConfidence] = useState<number>(0);
-  
-  // Blink detection state
-  const [blinkCount, setBlinkCount] = useState<number>(0);
-  const [livenessVerified, setLivenessVerified] = useState<boolean>(false);
-  const REQUIRED_BLINKS = 2;
-  
-  // Prevent simultaneous captures
-  const isCapturingBlink = useRef<boolean>(false);
-  const isCapturingCompare = useRef<boolean>(false);
-  const isMounted = useRef<boolean>(true);
-  
-  // Animations
+  const {  cameraRef,
+        permission,
+        requestPermission,
+        idUploaded, 
+        uploadingId,
+        isComparing,
+        isMatched,  
+        confidence,
+        blinkCount,
+        livenessVerified,
+        REQUIRED_BLINKS,
+        uploadId,
+        detectBlink,
+        captureAndCompare,
+        resetVerification,
+        isMounted,
+        isCapturingBlink,
+        isCapturingCompare} = useFaceRecog();
+ 
   const scanAnimation = useRef(new Animated.Value(0)).current;
   const pulseAnimation = useRef(new Animated.Value(1)).current;
   const borderAnimation = useRef(new Animated.Value(0)).current;
@@ -32,9 +31,7 @@ export default function LiveFaceVerification() {
   const successScale = useRef(new Animated.Value(0)).current;
   const fadeIn = useRef(new Animated.Value(0)).current;
 
-  const serverUrl = "http://192.168.1.12:8000/api/facial/v1";
-  const sessionId = useRef(`session-${Date.now()}`).current;
-
+ 
   useEffect(() => {
     isMounted.current = true;
     if (!permission?.granted) {
@@ -97,7 +94,6 @@ export default function LiveFaceVerification() {
     }
   }, [idUploaded, isMatched]);
 
-  // Border color animation
   useEffect(() => {
     Animated.loop(
       Animated.sequence([
@@ -115,7 +111,7 @@ export default function LiveFaceVerification() {
     ).start();
   }, []);
 
-  // Animate progress bar
+
   useEffect(() => {
     Animated.timing(progressAnimation, {
       toValue: blinkCount / REQUIRED_BLINKS,
@@ -138,7 +134,6 @@ export default function LiveFaceVerification() {
     }
   }, [isMatched]);
 
-  // Blink detection interval
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (idUploaded && cameraRef.current && !livenessVerified && isMounted.current) {
@@ -168,192 +163,11 @@ export default function LiveFaceVerification() {
     };
   }, [idUploaded, livenessVerified, isComparing]);
 
-  const uploadId = async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: true,
-        quality: 0.8,
-        aspect: [3, 4],
-      });
+  
 
-      if (result.canceled || !result.assets?.length) return;
-
-      setUploadingId(true);
-      const formData = new FormData();
-      
-      const uri = result.assets[0].uri;
-      const filename = uri.split('/').pop() || 'id.jpg';
-      const match = /\.(\w+)$/.exec(filename);
-      const type = match ? `image/${match[1]}` : 'image/jpeg';
-
-      formData.append('file', {
-        uri: uri,
-        name: filename,
-        type: type,
-      } as any);
-
-      const response = await axios.post(`${serverUrl}/upload-id`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      });
-
-      const data = response.data;
-      
-      if (data.status === 'success') {
-        setIdUploaded(true);
-      }
-    } catch (err) {
-      console.error('Upload ID Error:', err);
-    } finally {
-      setUploadingId(false);
-    }
-  };
-
-  const detectBlink = async () => {
-    if (!cameraRef.current || livenessVerified || isCapturingBlink.current || !isMounted.current) {
-      return;
-    }
-
-    isCapturingBlink.current = true;
-
-    try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5,
-        skipProcessing: true,
-      });
-
-      if (!photo?.uri || !isMounted.current) {
-        isCapturingBlink.current = false;
-        return;
-      }
-
-      const formData = new FormData();
-      const filename = photo.uri.split('/').pop() || 'blink.jpg';
-      const match = /\.(\w+)$/.exec(filename);
-      const type = match ? `image/${match[1]}` : 'image/jpeg';
-
-      formData.append('file', {
-        uri: photo.uri,
-        name: filename,
-        type: type,
-      } as any);
-
-      formData.append('session_id', sessionId);
-
-      const response = await axios.post(`${serverUrl}/detect-blink`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 5000,
-      });
-
-      if (!isMounted.current) return;
-
-      const data = response.data;
-      
-      if (data.face_detected) {
-        setBlinkCount(data.blink_count);
-
-        if (data.blink_count >= REQUIRED_BLINKS && !livenessVerified) {
-          setLivenessVerified(true);
-        }
-      }
-    } catch (err: any) {
-      if (isMounted.current) {
-        console.error('Blink Detection Error:', err);
-      }
-    } finally {
-      isCapturingBlink.current = false;
-    }
-  };
-
-  const captureAndCompare = async () => {
-    if (!cameraRef.current || isComparing || !livenessVerified || isCapturingCompare.current || !isMounted.current) {
-      return;
-    }
-
-    setIsComparing(true);
-    isCapturingCompare.current = true;
-
-    try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.6,
-        skipProcessing: true,
-      });
-
-      if (!photo?.uri || !isMounted.current) {
-        setIsComparing(false);
-        isCapturingCompare.current = false;
-        return;
-      }
-
-      const formData = new FormData();
-      const filename = photo.uri.split('/').pop() || 'live.jpg';
-      const match = /\.(\w+)$/.exec(filename);
-      const type = match ? `image/${match[1]}` : 'image/jpeg';
-
-      formData.append('file', {
-        uri: photo.uri,
-        name: filename,
-        type: type,
-      } as any);
-
-      const response = await axios.post(`${serverUrl}/compare`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 10000,
-      });
-
-      if (!isMounted.current) return;
-
-      const data = response.data;
-      
-      if (data.match) {
-        setIsMatched(true);
-        const confidencePercent = Math.max(0, Math.min(100, (1 - data.distance / data.threshold) * 100));
-        setConfidence(confidencePercent);
-      } else {
-        setIsMatched(false);
-        setConfidence(0);
-      }
-    } catch (err: any) {
-      if (isMounted.current) {
-        console.error('Compare Error:', err);
-        setIsMatched(false);
-      }
-    } finally {
-      if (isMounted.current) {
-        setIsComparing(false);
-      }
-      isCapturingCompare.current = false;
-    }
-  };
 
   
 
-  const resetVerification = async () => {
-    isCapturingBlink.current = false;
-    isCapturingCompare.current = false;
-    
-    setIdUploaded(false);
-    setIsMatched(false);
-    setConfidence(0);
-    setBlinkCount(0);
-    setLivenessVerified(false);
-    setIsComparing(false);
-    
-    progressAnimation.setValue(0);
-    
-    try {
-      await axios.post(`${serverUrl}/reset-blink-session`, { session_id: sessionId });
-      await axios.post(`${serverUrl}/reset`);
-    } catch (err) {
-      console.error('Reset error:', err);
-    }
-  };
 
   if (!permission) {
     return (

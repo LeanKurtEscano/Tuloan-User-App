@@ -4,26 +4,33 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import axios from 'axios';
 import { useFaceRecog } from '@/hooks/useFaceRecognition';
+
 export default function LiveFaceVerification() {
-  const {  cameraRef,
-        permission,
-        requestPermission,
-        idUploaded, 
-        uploadingId,
-        isComparing,
-        isMatched,  
-        confidence,
-        blinkCount,
-        livenessVerified,
-        REQUIRED_BLINKS,
-        uploadId,
-        detectBlink,
-        captureAndCompare,
-        resetVerification,
-        isMounted,
-        isCapturingBlink,
-        isCapturingCompare} = useFaceRecog();
- 
+  const {
+    cameraRef,
+    permission,
+    requestPermission,
+    idUploaded,
+    uploadingId,
+    isComparing,
+    isMatched,
+    confidence,
+    blinkDetected,
+    leftPoseDetected,
+    rightPoseDetected,
+    livenessVerified,
+    uploadId,
+    detectBlink,
+    detectHeadTurn,
+    captureAndCompare,
+    resetVerification,
+    isMounted,
+    isCapturingBlink,
+    isCapturingLeft,
+    isCapturingRight,
+    isCapturingCompare
+  } = useFaceRecog();
+
   const scanAnimation = useRef(new Animated.Value(0)).current;
   const pulseAnimation = useRef(new Animated.Value(1)).current;
   const borderAnimation = useRef(new Animated.Value(0)).current;
@@ -31,21 +38,25 @@ export default function LiveFaceVerification() {
   const successScale = useRef(new Animated.Value(0)).current;
   const fadeIn = useRef(new Animated.Value(0)).current;
 
- 
+  // Current step: 'blink', 'left', 'right', or 'verify'
+  const [currentStep, setCurrentStep] = useState<'blink' | 'left' | 'right' | 'verify'>('blink');
+
   useEffect(() => {
     isMounted.current = true;
     if (!permission?.granted) {
       requestPermission();
     }
-    
+
     return () => {
       isMounted.current = false;
       isCapturingBlink.current = false;
+      isCapturingLeft.current = false;
+      isCapturingRight.current = false;
       isCapturingCompare.current = false;
     };
   }, []);
 
-  // Fade in animation on mount
+  // Fade in animation
   useEffect(() => {
     Animated.timing(fadeIn, {
       toValue: 1,
@@ -54,7 +65,7 @@ export default function LiveFaceVerification() {
     }).start();
   }, []);
 
-  // Continuous scanning line animation
+  // Scanning line animation
   useEffect(() => {
     if (idUploaded) {
       Animated.loop(
@@ -74,7 +85,7 @@ export default function LiveFaceVerification() {
     }
   }, [idUploaded]);
 
-  // Pulse animation for active scanning
+  // Pulse animation
   useEffect(() => {
     if (idUploaded && !isMatched) {
       Animated.loop(
@@ -94,6 +105,7 @@ export default function LiveFaceVerification() {
     }
   }, [idUploaded, isMatched]);
 
+  // Border animation
   useEffect(() => {
     Animated.loop(
       Animated.sequence([
@@ -111,14 +123,20 @@ export default function LiveFaceVerification() {
     ).start();
   }, []);
 
-
+  // Progress animation
   useEffect(() => {
+    const totalSteps = 3;
+    let completedSteps = 0;
+    if (blinkDetected) completedSteps++;
+    if (leftPoseDetected) completedSteps++;
+    if (rightPoseDetected) completedSteps++;
+
     Animated.timing(progressAnimation, {
-      toValue: blinkCount / REQUIRED_BLINKS,
+      toValue: completedSteps / totalSteps,
       duration: 300,
       useNativeDriver: false,
     }).start();
-  }, [blinkCount]);
+  }, [blinkDetected, leftPoseDetected, rightPoseDetected]);
 
   // Success animation
   useEffect(() => {
@@ -134,9 +152,23 @@ export default function LiveFaceVerification() {
     }
   }, [isMatched]);
 
+  // Update current step based on completion
+  useEffect(() => {
+    if (!blinkDetected) {
+      setCurrentStep('blink');
+    } else if (!leftPoseDetected) {
+      setCurrentStep('left');
+    } else if (!rightPoseDetected) {
+      setCurrentStep('right');
+    } else {
+      setCurrentStep('verify');
+    }
+  }, [blinkDetected, leftPoseDetected, rightPoseDetected]);
+
+  // Blink detection interval
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (idUploaded && cameraRef.current && !livenessVerified && isMounted.current) {
+    if (idUploaded && currentStep === 'blink' && !blinkDetected && isMounted.current) {
       interval = setInterval(() => {
         if (!isCapturingBlink.current && isMounted.current) {
           detectBlink();
@@ -146,13 +178,43 @@ export default function LiveFaceVerification() {
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [idUploaded, livenessVerified]);
+  }, [idUploaded, currentStep, blinkDetected]);
 
-  // Face comparison interval (only after liveness verified)
+  // Left turn detection interval
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (idUploaded && livenessVerified && cameraRef.current && !isComparing && isMounted.current) {
-       interval = setInterval(() => {
+    if (idUploaded && currentStep === 'left' && !leftPoseDetected && isMounted.current) {
+      interval = setInterval(() => {
+        if (!isCapturingLeft.current && isMounted.current) {
+          detectHeadTurn('left');
+        }
+      }, 500);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [idUploaded, currentStep, leftPoseDetected]);
+
+  // Right turn detection interval
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (idUploaded && currentStep === 'right' && !rightPoseDetected && isMounted.current) {
+      interval = setInterval(() => {
+        if (!isCapturingRight.current && isMounted.current) {
+          detectHeadTurn('right');
+        }
+      }, 500);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [idUploaded, currentStep, rightPoseDetected]);
+
+  // Face comparison interval (after all liveness checks)
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (idUploaded && livenessVerified && !isComparing && isMounted.current) {
+      interval = setInterval(() => {
         if (!isCapturingCompare.current && isMounted.current) {
           captureAndCompare();
         }
@@ -162,12 +224,6 @@ export default function LiveFaceVerification() {
       if (interval) clearInterval(interval);
     };
   }, [idUploaded, livenessVerified, isComparing]);
-
-  
-
-
-  
-
 
   if (!permission) {
     return (
@@ -214,45 +270,93 @@ export default function LiveFaceVerification() {
 
   const borderColor = borderAnimation.interpolate({
     inputRange: [0, 1],
-    outputRange: isMatched 
+    outputRange: isMatched
       ? ['#10B981', '#34D399']
       : livenessVerified
       ? ['#3B82F6', '#60A5FA']
       : ['#0066FF', '#4D94FF'],
   });
 
+
+
   return (
     <View className="flex-1 bg-white">
       {!idUploaded ? (
-        <Animated.View style={{ opacity: fadeIn }} className="flex-1 justify-center items-center bg-blue-600 px-8">
-          <View className="items-center">
-            <View className="bg-white rounded-full w-32 h-32 items-center justify-center mb-8 shadow-xl">
-              <Text className="text-7xl">🆔</Text>
+        <Animated.View style={{ opacity: fadeIn }} className="flex-1 bg-blue-600">
+          <View className="flex-1 justify-center items-center px-8">
+            <View className="items-center">
+              <View className="bg-white rounded-full w-32 h-32 items-center justify-center mb-8 shadow-xl">
+                <Text className="text-7xl">🆔</Text>
+              </View>
+              <Text className="text-white text-3xl font-bold mb-4 text-center">
+                Face Verification
+              </Text>
+              <Text className="text-white/90 text-base mb-12 text-center leading-6">
+                Upload a photo of your valid ID to begin the verification process
+              </Text>
+              <TouchableOpacity
+                onPress={uploadId}
+                disabled={uploadingId}
+                className={`w-full px-10 py-5 rounded-full shadow-xl ${
+                  uploadingId ? 'bg-white/50' : 'bg-white active:bg-gray-100'
+                }`}
+              >
+                {uploadingId ? (
+                  <View className="flex-row items-center justify-center">
+                    <ActivityIndicator size="small" color="#0066FF" />
+                    <Text className="text-blue-600 font-bold text-lg ml-3">Uploading...</Text>
+                  </View>
+                ) : (
+                  <Text className="text-blue-600 font-bold text-lg text-center">
+                    Upload ID Photo
+                  </Text>
+                )}
+              </TouchableOpacity>
             </View>
-            <Text className="text-white text-3xl font-bold mb-4 text-center">
-              Face Verification
-            </Text>
-            <Text className="text-white/90 text-base mb-12 text-center leading-6">
-              Upload a photo of your valid ID to begin the verification process
-            </Text>
-            <TouchableOpacity
-              onPress={uploadId}
-              disabled={uploadingId}
-              className={`w-full px-10 py-5 rounded-full shadow-xl ${
-                uploadingId ? 'bg-white/50' : 'bg-white active:bg-gray-100'
-              }`}
-            >
-              {uploadingId ? (
-                <View className="flex-row items-center justify-center">
-                  <ActivityIndicator size="small" color="#0066FF" />
-                  <Text className="text-blue-600 font-bold text-lg ml-3">Uploading...</Text>
+          </View>
+
+          <View className="px-8 pb-8">
+            <View className="bg-white/10 rounded-3xl p-6 backdrop-blur">
+              <Text className="text-white font-semibold text-base mb-4">
+                📋 Accepted IDs
+              </Text>
+              <View className="space-y-3">
+                <View className="flex-row items-center">
+                  <View className="w-2 h-2 bg-white rounded-full mr-3" />
+                  <Text className="text-white/90 text-sm">Driver's License</Text>
                 </View>
-              ) : (
-                <Text className="text-blue-600 font-bold text-lg text-center">
-                  Upload ID Photo
-                </Text>
-              )}
-            </TouchableOpacity>
+                <View className="flex-row items-center">
+                  <View className="w-2 h-2 bg-white rounded-full mr-3" />
+                  <Text className="text-white/90 text-sm">Passport</Text>
+                </View>
+                <View className="flex-row items-center">
+                  <View className="w-2 h-2 bg-white rounded-full mr-3" />
+                  <Text className="text-white/90 text-sm">National ID</Text>
+                </View>
+                <View className="flex-row items-center">
+                  <View className="w-2 h-2 bg-white rounded-full mr-3" />
+                  <Text className="text-white/90 text-sm">Postal ID</Text>
+                </View>
+              </View>
+            </View>
+
+            <View className="bg-white/10 rounded-3xl p-6 mt-4 backdrop-blur">
+              <Text className="text-white font-semibold text-base mb-3">
+                💡 Tips for best results
+              </Text>
+              <Text className="text-white/80 text-sm leading-5">
+                • Ensure your ID is well-lit and in focus{'\n'}
+                • All corners should be visible{'\n'}
+                • Avoid glare and shadows
+              </Text>
+            </View>
+          </View>
+
+          <View className="items-center pb-8">
+            <View className="flex-row items-center bg-white/10 px-4 py-2 rounded-full">
+              <Text className="text-white/70 text-xs mr-1">🔒</Text>
+              <Text className="text-white/70 text-xs">Your data is encrypted and secure</Text>
+            </View>
           </View>
         </Animated.View>
       ) : (
@@ -261,14 +365,6 @@ export default function LiveFaceVerification() {
           <View className="pt-14 pb-6 px-6 bg-blue-600">
             <Text className="text-white text-2xl font-bold text-center mb-1">
               Face Verification
-            </Text>
-            <Text className="text-white/80 text-sm text-center">
-              {!livenessVerified 
-                ? `Blink ${REQUIRED_BLINKS} times naturally`
-                : isMatched
-                ? "Verification successful!"
-                : "Verifying your identity..."
-              }
             </Text>
           </View>
 
@@ -282,21 +378,35 @@ export default function LiveFaceVerification() {
                     Liveness Check
                   </Text>
                   <Text className="text-blue-600 font-bold text-base">
-                    {blinkCount}/{REQUIRED_BLINKS}
+                    {[blinkDetected, leftPoseDetected, rightPoseDetected].filter(Boolean).length}/3
                   </Text>
                 </View>
                 <View className="h-2 bg-blue-200 rounded-full overflow-hidden">
-                  <Animated.View 
-                    style={{ 
+                  <Animated.View
+                    style={{
                       width: progressWidth,
                       backgroundColor: '#0066FF',
                       height: '100%',
-                    }} 
+                    }}
                   />
                 </View>
-                <Text className="text-blue-700 text-xs mt-3 text-center">
-                  Blink naturally to confirm you're a real person
-                </Text>
+
+                {/* Step indicators */}
+                <View className="flex-row justify-between mt-4">
+                    {!blinkDetected && !leftPoseDetected && !rightPoseDetected ? (
+                      <Text className="text-blue-600 font-medium text-sm">Please blink naturally to confirm you're a live user.</Text>
+                    ) : (null)}
+
+                    {blinkDetected && !leftPoseDetected && !rightPoseDetected ? (
+                      <Text className="text-blue-600 font-medium text-sm">Please show the left side of your face hold for a moment.</Text>
+                    ) : (null)}
+
+                    {blinkDetected && leftPoseDetected && !rightPoseDetected ? (
+                      <Text className="text-blue-600 font-medium text-sm">Please show the right side of your face hold for a moment.</Text>
+                    ) : (null)}
+
+
+                </View>
               </View>
             )}
 
@@ -312,7 +422,7 @@ export default function LiveFaceVerification() {
                     width: 330,
                     height: 330,
                     borderRadius: 165,
-                    backgroundColor: isMatched 
+                    backgroundColor: isMatched
                       ? 'rgba(16, 185, 129, 0.15)'
                       : 'rgba(0, 102, 255, 0.15)',
                     transform: [{ scale: pulseAnimation }],
@@ -329,8 +439,8 @@ export default function LiveFaceVerification() {
                     backgroundColor: '#000',
                   }}
                 >
-                  <CameraView 
-                    ref={cameraRef} 
+                  <CameraView
+                    ref={cameraRef}
                     style={{ width: 300, height: 300 }}
                     facing="front"
                     mirror={true}
@@ -338,7 +448,7 @@ export default function LiveFaceVerification() {
                 </View>
 
                 {/* Border */}
-                <Animated.View 
+                <Animated.View
                   style={{
                     position: 'absolute',
                     top: 0,
@@ -352,8 +462,8 @@ export default function LiveFaceVerification() {
                 />
 
                 {/* Scanning Line */}
-                <Animated.View 
-                  style={{ 
+                <Animated.View
+                  style={{
                     position: 'absolute',
                     left: 0,
                     top: 0,
@@ -364,7 +474,7 @@ export default function LiveFaceVerification() {
                     shadowColor: isMatched ? '#10B981' : '#0066FF',
                     shadowOpacity: 0.8,
                     shadowRadius: 10,
-                  }} 
+                  }}
                 />
 
                 {/* Corner Guides */}
@@ -390,43 +500,50 @@ export default function LiveFaceVerification() {
                   />
                 ))}
 
+                {/* Current Step Indicator */}
+                
+
                 {/* Liveness Badge */}
                 {livenessVerified && (
-                  <View style={{
-                    position: 'absolute',
-                    top: -10,
-                    left: -10,
-                    backgroundColor: '#10B981',
-                    borderRadius: 25,
-                    width: 50,
-                    height: 50,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    shadowColor: '#10B981',
-                    shadowOpacity: 0.5,
-                    shadowRadius: 10,
-                  }}>
+                  <View
+                    style={{
+                      position: 'absolute',
+                      top: -10,
+                      left: -10,
+                      backgroundColor: '#10B981',
+                      borderRadius: 25,
+                      width: 50,
+                      height: 50,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      shadowColor: '#10B981',
+                      shadowOpacity: 0.5,
+                      shadowRadius: 10,
+                    }}
+                  >
                     <Text style={{ color: 'white', fontSize: 24, fontWeight: 'bold' }}>✓</Text>
                   </View>
                 )}
 
                 {/* Success Badge */}
                 {isMatched && (
-                  <Animated.View style={{
-                    position: 'absolute',
-                    top: -10,
-                    right: -10,
-                    backgroundColor: '#10B981',
-                    borderRadius: 25,
-                    width: 50,
-                    height: 50,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    shadowColor: '#10B981',
-                    shadowOpacity: 0.5,
-                    shadowRadius: 10,
-                    transform: [{ scale: successScale }],
-                  }}>
+                  <Animated.View
+                    style={{
+                      position: 'absolute',
+                      top: -10,
+                      right: -10,
+                      backgroundColor: '#10B981',
+                      borderRadius: 25,
+                      width: 50,
+                      height: 50,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      shadowColor: '#10B981',
+                      shadowOpacity: 0.5,
+                      shadowRadius: 10,
+                      transform: [{ scale: successScale }],
+                    }}
+                  >
                     <Text style={{ color: 'white', fontSize: 24, fontWeight: 'bold' }}>✓</Text>
                   </Animated.View>
                 )}
@@ -435,27 +552,13 @@ export default function LiveFaceVerification() {
 
             {/* Success Card */}
             {isMatched && (
-              <Animated.View 
+              <Animated.View
                 style={{ transform: [{ scale: successScale }] }}
                 className="bg-green-50 rounded-3xl p-6 mb-6 border-2 border-green-200"
               >
                 <Text className="text-green-700 text-center text-xl font-bold mb-4">
                   ✓ Identity Verified
                 </Text>
-                <View className="flex-row justify-around">
-                  <View className="items-center">
-                    <Text className="text-green-600 text-xs mb-1">Liveness</Text>
-                    <View className="bg-green-100 rounded-full w-12 h-12 items-center justify-center">
-                      <Text className="text-green-700 text-xl font-bold">✓</Text>
-                    </View>
-                  </View>
-                  <View className="items-center">
-                    <Text className="text-green-600 text-xs mb-1">Match Score</Text>
-                    <View className="bg-green-100 rounded-full w-12 h-12 items-center justify-center">
-                      <Text className="text-green-700 text-sm font-bold">{confidence.toFixed(0)}%</Text>
-                    </View>
-                  </View>
-                </View>
               </Animated.View>
             )}
           </View>
@@ -467,20 +570,20 @@ export default function LiveFaceVerification() {
                 onPress={resetVerification}
                 className="flex-1 bg-gray-100 px-6 py-4 rounded-full active:bg-gray-200"
               >
-                <Text className="text-gray-700 text-center text-base font-bold">
-                  Start Over
-                </Text>
+                <Text className="text-gray-700 text-center text-base font-bold">Start Over</Text>
               </TouchableOpacity>
-              
+
               <TouchableOpacity
                 disabled={!isMatched}
                 className={`flex-1 px-6 py-4 rounded-full ${
                   isMatched ? 'bg-blue-600 active:bg-blue-700' : 'bg-gray-300'
                 }`}
               >
-                <Text className={`text-center text-base font-bold ${
-                  isMatched ? 'text-white' : 'text-gray-500'
-                }`}>
+                <Text
+                  className={`text-center text-base font-bold ${
+                    isMatched ? 'text-white' : 'text-gray-500'
+                  }`}
+                >
                   {isMatched ? 'Continue' : 'Processing...'}
                 </Text>
               </TouchableOpacity>

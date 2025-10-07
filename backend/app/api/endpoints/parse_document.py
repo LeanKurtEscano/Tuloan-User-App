@@ -111,13 +111,13 @@ def detect_head_pose(image_path: str):
     """
     Detect head pose (profile/angled view) by checking if a face is detected
     but with reduced frontal characteristics.
-    Returns: (face_detected, is_profile, face_area, eye_count)
+    Returns: (face_detected, is_profile, face_area, eye_count, is_frontal)
     """
     try:
         img = cv2.imread(image_path)
         if img is None:
             print("  ❌ Could not read image")
-            return False, False, 0, 0
+            return False, False, 0, 0, False
         
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
@@ -135,7 +135,7 @@ def detect_head_pose(image_path: str):
         
         if not face_detected:
             print("  ❌ No face detected")
-            return False, False, 0, 0
+            return False, False, 0, 0, False
         
         # Check if it's a profile view
         is_profile = len(profile_faces) > 0
@@ -160,18 +160,54 @@ def detect_head_pose(image_path: str):
         
         print(f"  👁️ Eyes detected: {eye_count}")
         
+        # Determine if facing front (both eyes visible)
+        is_frontal = eye_count >= 2
+        
         # Profile detection logic:
         # - If profile cascade detected face OR
         # - If frontal face but only 0-1 eyes visible (indicating turned head)
         is_profile = is_profile or (len(frontal_faces) > 0 and eye_count <= 1)
         
-        return True, is_profile, int(face_area), int(eye_count)
+        return True, is_profile, int(face_area), int(eye_count), is_frontal
         
     except Exception as e:
         print(f"  ❌ Error in pose detection: {str(e)}")
         import traceback
         traceback.print_exc()
-        return False, False, 0, 0
+        return False, False, 0, 0, False
+
+
+def verify_against_id(live_image_path: str) -> tuple:
+    """
+    Verify if the person in the live image matches the ID.
+    Returns: (is_match, distance, threshold, error_message)
+    """
+    global id_path
+    
+    if id_path is None or not os.path.exists(id_path):
+        return False, None, None, "ID not uploaded"
+    
+    try:
+        result = DeepFace.verify(
+            img1_path=id_path,
+            img2_path=live_image_path,
+            model_name="ArcFace",
+            enforce_detection=True,
+            detector_backend="mtcnn"
+        )
+        
+        verified = result["verified"]
+        distance = result["distance"]
+        threshold = result["threshold"]
+        
+        print(f"  🔍 ID Verification: {'✅ MATCH' if verified else '❌ NO MATCH'} - Distance: {distance:.4f}, Threshold: {threshold:.4f}")
+        
+        return verified, distance, threshold, None
+        
+    except Exception as e:
+        error_msg = str(e).lower()
+        print(f"  ❌ ID Verification Error: {str(e)}")
+        return False, None, None, str(e)
 
 
 def get_or_create_session(session_id: str) -> dict:
@@ -190,7 +226,9 @@ def get_or_create_session(session_id: str) -> dict:
             "last_left_time": 0,
             "last_right_time": 0,
             "created_at": time.time(),
-            "frame_count": 0
+            "frame_count": 0,
+            "left_frontal_rejected_count": 0,
+            "right_frontal_rejected_count": 0
         }
     return liveness_sessions[session_id]
 
@@ -331,6 +369,8 @@ async def detect_head_turn(file: UploadFile = File(...), session_id: str = "defa
     """
     Detect head turn (left or right profile) for liveness verification.
     Direction should be 'left' or 'right'.
+    IMPORTANT: User must actually turn their head - frontal face will be rejected.
+    After successful turn detection, verifies against ID photo.
     """
     live_path = str(TEMP_DIR / f"temp_pose_{session_id}_{direction}.jpg")
     
@@ -345,37 +385,67 @@ async def detect_head_turn(file: UploadFile = File(...), session_id: str = "defa
         print(f"\n{'='*60}")
         print(f"📸 HEAD TURN CHECK ({direction.upper()}) - Frame #{session['frame_count']} - Session: {session_id}")
         
-        face_detected, is_profile, face_area, eye_count = detect_head_pose(live_path)
+        face_detected, is_profile, face_area, eye_count, is_frontal = detect_head_pose(live_path)
         
         current_time = time.time()
         pose_completed = False
+        id_verified = False
+        id_distance = None
+        id_threshold = None
+        rejection_reason = None
         
         if face_detected:
             state_key = f"previous_{direction}_state"
             detected_key = f"{direction}_pose_detected"
             time_key = f"last_{direction}_time"
+            frontal_reject_key = f"{direction}_frontal_rejected_count"
             
             current_state = "profile" if is_profile else "frontal"
             previous_state = session.get(state_key, "frontal")
             
             print(f"📊 {direction.capitalize()} Pose State: {previous_state} → {current_state}")
-            print(f"📐 Face Area: {face_area}, Eyes: {eye_count}")
+            print(f"📐 Face Area: {face_area}, Eyes: {eye_count}, Is Frontal: {is_frontal}")
+            
+            # CRITICAL: Reject if user is facing front (both eyes visible)
+            if is_frontal and not session[detected_key]:
+                session[frontal_reject_key] = session.get(frontal_reject_key, 0) + 1
+                rejection_reason = f"Please turn your head to the {direction}, not facing front"
+                print(f"❌ REJECTED: User is facing front (both eyes visible)")
+                print(f"⚠️ Frontal rejections for {direction}: {session[frontal_reject_key]}")
             
             # HEAD TURN DETECTION: profile detected and not yet completed
-            if is_profile and not session[detected_key]:
+            elif is_profile and not session[detected_key]:
                 time_since_last = current_time - session[time_key]
                 
                 # Verify it's actually a profile (1 or fewer eyes visible)
                 if eye_count <= 1 and time_since_last >= 0.3:
-                    session[detected_key] = True
-                    session[time_key] = current_time
-                    pose_completed = True
                     print(f"✅ ✅ ✅ {direction.upper()} TURN DETECTED! ✅ ✅ ✅")
+                    print(f"🔍 Now verifying against ID photo...")
+                    
+                    # Verify against ID photo
+                    is_match, distance, threshold, error_msg = verify_against_id(live_path)
+                    
+                    if is_match:
+                        session[detected_key] = True
+                        session[time_key] = current_time
+                        pose_completed = True
+                        id_verified = True
+                        id_distance = distance
+                        id_threshold = threshold
+                        print(f"✅ ✅ ✅ ID VERIFIED! Person matches ID photo! ✅ ✅ ✅")
+                    else:
+                        rejection_reason = "Person does not match ID photo"
+                        print(f"❌ ID VERIFICATION FAILED: {error_msg if error_msg else 'No match'}")
+                        if distance and threshold:
+                            id_distance = distance
+                            id_threshold = threshold
                 else:
+                    rejection_reason = f"Turn not confirmed: eyes={eye_count}, time={time_since_last:.2f}s"
                     print(f"⚠️ {direction.capitalize()} turn not confirmed: eyes={eye_count}, time={time_since_last:.2f}s")
             
             session[state_key] = current_state
         else:
+            rejection_reason = "No face detected"
             print(f"⚠️ No face detected")
         
         detected_key = f"{direction}_pose_detected"
@@ -385,16 +455,29 @@ async def detect_head_turn(file: UploadFile = File(...), session_id: str = "defa
         if os.path.exists(live_path):
             os.remove(live_path)
         
+        # Prepare response message
+        if session[detected_key]:
+            message = f"{direction.capitalize()} turn verified and ID confirmed!"
+        elif rejection_reason:
+            message = rejection_reason
+        else:
+            message = f"Turn your head to the {direction}..."
+        
         return {
             "face_detected": bool(face_detected),
             "is_profile": bool(is_profile),
+            "is_frontal": bool(is_frontal),
             "pose_detected": bool(session[detected_key]),
             "pose_completed": pose_completed,
+            "id_verified": id_verified,
+            "id_distance": float(id_distance) if id_distance is not None else None,
+            "id_threshold": float(id_threshold) if id_threshold is not None else None,
             "direction": direction,
             "face_area": face_area,
             "eye_count": eye_count,
             "session_id": session_id,
-            "message": f"{direction.capitalize()} turn detected!" if session[detected_key] else f"Turn your head to the {direction}..."
+            "rejection_reason": rejection_reason,
+            "message": message
         }
         
     except Exception as e:
@@ -408,10 +491,11 @@ async def detect_head_turn(file: UploadFile = File(...), session_id: str = "defa
         return {
             "face_detected": False,
             "is_profile": False,
+            "is_frontal": False,
             "pose_detected": False,
+            "id_verified": False,
             "error": str(e)
         }
-
 
 @router.post("/compare")
 async def compare(file: UploadFile = File(...)):

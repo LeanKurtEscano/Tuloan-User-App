@@ -124,11 +124,10 @@ def detect_head_pose(image_path: str):
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
         eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-        
-        # Detect frontal face
+  
         frontal_faces = face_cascade.detectMultiScale(gray, 1.3, 5)
         
-        # Detect profile face
+    
         profile_faces = profile_cascade.detectMultiScale(gray, 1.3, 5)
         
         face_detected = len(frontal_faces) > 0 or len(profile_faces) > 0
@@ -316,7 +315,30 @@ async def detect_blink(file: UploadFile = File(...), session_id: str = "default"
                 print(f"⏱️ Eyes closed duration: {time_closed:.2f}s")
                 
                 if time_closed >= 0.05 and time_since_last >= 0.2:
-                    session["blink_detected"] = True
+                  
+                    try:
+                        result = DeepFace.verify(
+                            img1_path=id_path,
+                            img2_path=live_path,
+                            model_name="ArcFace",  
+                            detector_backend="mtcnn",
+                            enforce_detection=True)
+                        
+                        
+                        verified = result["verified"]
+                        
+                        distance = result["distance"]
+                        threshold = result["threshold"]
+                        
+                        if verified:
+                            session["blink_detected"] = True
+                            print(f"✅ ✅ ✅ ID VERIFIED during blink! Person matches ID photo! ✅ ✅ ✅")
+                        
+                    except Exception as e:
+                        print(f"  ❌ Error updating session: {str(e)}")
+                    
+                      
+                        
                     session["last_blink_time"] = current_time
                     blink_completed = True
                     print(f"✅ ✅ ✅ BLINK DETECTED! ✅ ✅ ✅")

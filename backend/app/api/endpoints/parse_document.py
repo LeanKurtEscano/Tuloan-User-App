@@ -8,172 +8,19 @@ import os
 from pathlib import Path
 from typing import Dict
 import time
-
+from app.services.anti_spoof import detect_head_pose
 router = APIRouter()
 id_path = None
-
+from app.services.blink_detection import FaceBlinkDetector
 TEMP_DIR = Path("temp_uploads")
 TEMP_DIR.mkdir(exist_ok=True)
 
 # Session storage for liveness verification
 liveness_sessions: Dict[str, dict] = {}
-
+detector = FaceBlinkDetector()  
 class LivenessResetRequest(BaseModel):
     session_id: str
 
-
-def detect_blink_opencv(image_path: str):
-    """
-    Detect blinks using OpenCV's Haar Cascade for eyes.
-    Returns: (face_detected, eyes_open, left_ear, right_ear, num_eyes_detected)
-    """
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            print("  ❌ Could not read image")
-            return False, True, 0.0, 0.0, 0
-        
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-        
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-        faces_list = list(faces) if len(faces) > 0 else []
-        
-        if len(faces_list) == 0:
-            print("  ❌ No face detected")
-            return False, True, 0.0, 0.0, 0
-        
-        (x, y, w, h) = max(faces_list, key=lambda face: face[2] * face[3])
-        x, y, w, h = int(x), int(y), int(w), int(h)
-        
-        print(f"  ✅ Face detected at ({x},{y}) size {w}x{h}")
-        
-        roi_y_end = int(y + h * 0.6)
-        roi_gray = gray[y:roi_y_end, x:x+w]
-        
-        eyes_list = []
-        
-        # Strategy 1: Very lenient detection
-        eyes1 = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.05, minNeighbors=2, minSize=(10, 10))
-        if len(eyes1) > 0:
-            eyes_list = list(eyes1)
-            print(f"  👁️ Strategy 1: Found {len(eyes_list)} eyes")
-        
-        # Strategy 2: Alternative parameters
-        if len(eyes_list) == 0:
-            eyes2 = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
-            if len(eyes2) > 0:
-                eyes_list = list(eyes2)
-                print(f"  👁️ Strategy 2: Found {len(eyes_list)} eyes")
-        
-        # Strategy 3: Enhanced with histogram equalization
-        if len(eyes_list) == 0:
-            roi_enhanced = cv2.equalizeHist(roi_gray)
-            eyes3 = eye_cascade.detectMultiScale(roi_enhanced, scaleFactor=1.05, minNeighbors=2, minSize=(10, 10))
-            if len(eyes3) > 0:
-                eyes_list = list(eyes3)
-                print(f"  👁️ Strategy 3 (enhanced): Found {len(eyes_list)} eyes")
-        
-        num_eyes = len(eyes_list)
-        print(f"  👁️ Total eyes detected: {num_eyes}")
-        
-        if num_eyes >= 2:
-            eyes_sorted = sorted(eyes_list, key=lambda e: e[0])
-            left_eye = eyes_sorted[0]
-            right_eye = eyes_sorted[1]
-            
-            left_ratio = float(left_eye[3]) / float(left_eye[2]) if left_eye[2] > 0 else 0.0
-            right_ratio = float(right_eye[3]) / float(right_eye[2]) if right_eye[2] > 0 else 0.0
-            
-            print(f"  👁️ Both eyes visible - Ratios: L={left_ratio:.3f}, R={right_ratio:.3f}")
-            return True, True, left_ratio, right_ratio, num_eyes
-        
-        elif num_eyes == 1:
-            eye = eyes_list[0]
-            ratio = float(eye[3]) / float(eye[2]) if eye[2] > 0 else 0.0
-            print(f"  ⚠️ Only 1 eye detected - Ratio: {ratio:.3f} - marking as CLOSED")
-            return True, False, ratio, ratio, num_eyes
-        
-        else:
-            print(f"  🔴 NO EYES DETECTED - Eyes are CLOSED!")
-            return True, False, 0.0, 0.0, num_eyes
-            
-    except Exception as e:
-        print(f"  ❌ Error in blink detection: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False, True, 0.0, 0.0, 0
-
-
-def detect_head_pose(image_path: str):
-    """
-    Detect head pose (profile/angled view) by checking if a face is detected
-    but with reduced frontal characteristics.
-    Returns: (face_detected, is_profile, face_area, eye_count, is_frontal)
-    """
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            print("  ❌ Could not read image")
-            return False, False, 0, 0, False
-        
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
-        eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-  
-        frontal_faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-        
-    
-        profile_faces = profile_cascade.detectMultiScale(gray, 1.3, 5)
-        
-        face_detected = len(frontal_faces) > 0 or len(profile_faces) > 0
-        
-        if not face_detected:
-            print("  ❌ No face detected")
-            return False, False, 0, 0, False
-        
-        # Check if it's a profile view
-        is_profile = len(profile_faces) > 0
-        
-        # Get face area
-        if len(frontal_faces) > 0:
-            (x, y, w, h) = max(frontal_faces, key=lambda face: face[2] * face[3])
-            face_area = w * h
-            print(f"  ✅ Frontal face detected - Area: {face_area}")
-        else:
-            (x, y, w, h) = max(profile_faces, key=lambda face: face[2] * face[3])
-            face_area = w * h
-            print(f"  📐 Profile face detected - Area: {face_area}")
-        
-        # Count visible eyes
-        x, y, w, h = int(x), int(y), int(w), int(h)
-        roi_y_end = int(y + h * 0.6)
-        roi_gray = gray[y:roi_y_end, x:x+w]
-        
-        eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=3, minSize=(15, 15))
-        eye_count = len(eyes)
-        
-        print(f"  👁️ Eyes detected: {eye_count}")
-        
-        # Determine if facing front (both eyes visible)
-        is_frontal = eye_count >= 2
-        
-        # Profile detection logic:
-        # - If profile cascade detected face OR
-        # - If frontal face but only 0-1 eyes visible (indicating turned head)
-        is_profile = is_profile or (len(frontal_faces) > 0 and eye_count <= 1)
-        
-        return True, is_profile, int(face_area), int(eye_count), is_frontal
-        
-    except Exception as e:
-        print(f"  ❌ Error in pose detection: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False, False, 0, 0, False
 
 
 def verify_against_id(live_image_path: str) -> tuple:
@@ -296,7 +143,7 @@ async def detect_blink(file: UploadFile = File(...), session_id: str = "default"
         print(f"\n{'='*60}")
         print(f"📸 BLINK CHECK - Frame #{session['frame_count']} - Session: {session_id}")
         
-        face_detected, eyes_open, left_ear, right_ear, num_eyes = detect_blink_opencv(live_path)
+        face_detected, eyes_open, left_ear, right_ear, num_eyes = FaceBlinkDetector.detect_blink(live_path)
         
         current_time = time.time()
         current_state = "open" if eyes_open else "closed"
@@ -668,3 +515,157 @@ async def get_session_status(session_id: str):
         "exists": False,
         "message": "Session not found"
     }
+    
+    
+    
+    
+    
+    '''
+FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+def detect_blink_opencv(image_path: str):
+    """
+    Detect blinks using pre-loaded OpenCV Haar Cascades.
+    Returns: (face_detected, eyes_open, left_ear, right_ear, num_eyes_detected)
+    """
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            print("  ❌ Could not read image")
+            return False, True, 0.0, 0.0, 0
+        
+        # Resize for faster processing
+        max_dimension = 640
+        h, w = img.shape[:2]
+        if max(h, w) > max_dimension:
+            scale = max_dimension / max(h, w)
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Use pre-loaded cascades (NO loading time!)
+        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4, minSize=(60, 60))
+        
+        if len(faces) == 0:
+            print("  ❌ No face detected")
+            return False, True, 0.0, 0.0, 0
+        
+        (x, y, w, h) = max(faces, key=lambda face: face[2] * face[3])
+        print(f"  ✅ Face detected at ({x},{y}) size {w}x{h}")
+        
+        roi_y_end = int(y + h * 0.6)
+        roi_gray = gray[y:roi_y_end, x:x+w]
+        roi_enhanced = cv2.equalizeHist(roi_gray)
+        
+        # Use pre-loaded eye cascade
+        eyes = EYE_CASCADE.detectMultiScale(
+            roi_enhanced,
+            scaleFactor=1.1,
+            minNeighbors=3,
+            minSize=(int(w * 0.15), int(h * 0.1)),
+            maxSize=(int(w * 0.4), int(h * 0.3))
+        )
+        
+        num_eyes = len(eyes)
+        print(f"  👁️ Eyes detected: {num_eyes}")
+        
+        if num_eyes >= 2:
+            eyes_sorted = sorted(eyes, key=lambda e: e[0])[:2]
+            left_eye, right_eye = eyes_sorted[0], eyes_sorted[1]
+            
+            left_ratio = float(left_eye[3]) / float(left_eye[2])
+            right_ratio = float(right_eye[3]) / float(right_eye[2])
+            
+            print(f"  👁️ Both eyes visible - Ratios: L={left_ratio:.3f}, R={right_ratio:.3f}")
+            return True, True, left_ratio, right_ratio, num_eyes
+        
+        elif num_eyes == 1:
+            eye = eyes[0]
+            ratio = float(eye[3]) / float(eye[2])
+            print(f"  ⚠️ Only 1 eye detected - Ratio: {ratio:.3f} - marking as CLOSED")
+            return True, False, ratio, ratio, num_eyes
+        
+        else:
+            print(f"  🔴 NO EYES DETECTED - Eyes are CLOSED!")
+            return True, False, 0.0, 0.0, num_eyes
+            
+    except Exception as e:
+        print(f"  ❌ Error in blink detection: {str(e)}")
+        return False, True, 0.0, 0.0, 0
+        
+'''        
+
+
+
+
+'''
+def detect_head_pose(image_path: str):
+   """
+   
+    Detect head pose (profile/angled view) by checking if a face is detected
+    but with reduced frontal characteristics.
+    Returns: (face_detected, is_profile, face_area, eye_count, is_frontal)
+    """
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            print("  ❌ Could not read image")
+            return False, False, 0, 0, False
+        
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
+        eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+  
+        frontal_faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        
+    
+        profile_faces = profile_cascade.detectMultiScale(gray, 1.3, 5)
+        
+        face_detected = len(frontal_faces) > 0 or len(profile_faces) > 0
+        
+        if not face_detected:
+            print("  ❌ No face detected")
+            return False, False, 0, 0, False
+        
+        # Check if it's a profile view
+        is_profile = len(profile_faces) > 0
+        
+        # Get face area
+        if len(frontal_faces) > 0:
+            (x, y, w, h) = max(frontal_faces, key=lambda face: face[2] * face[3])
+            face_area = w * h
+            print(f"  ✅ Frontal face detected - Area: {face_area}")
+        else:
+            (x, y, w, h) = max(profile_faces, key=lambda face: face[2] * face[3])
+            face_area = w * h
+            print(f"  📐 Profile face detected - Area: {face_area}")
+        
+        # Count visible eyes
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        roi_y_end = int(y + h * 0.6)
+        roi_gray = gray[y:roi_y_end, x:x+w]
+        
+        eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=3, minSize=(15, 15))
+        eye_count = len(eyes)
+        
+        print(f"  👁️ Eyes detected: {eye_count}")
+        
+        # Determine if facing front (both eyes visible)
+        is_frontal = eye_count >= 2
+        
+        # Profile detection logic:
+        # - If profile cascade detected face OR
+        # - If frontal face but only 0-1 eyes visible (indicating turned head)
+        is_profile = is_profile or (len(frontal_faces) > 0 and eye_count <= 1)
+        
+        return True, is_profile, int(face_area), int(eye_count), is_frontal
+        
+    except Exception as e:
+        print(f"  ❌ Error in pose detection: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False, False, 0, 0, False
+'''
